@@ -54,12 +54,14 @@ int botKnobDelta = 0;
 
 int EFFECT_STYLE = 0;       // zero means blank screen
 uint16_t color = 0xF800;    // Red by default
+static int brightness = 31; // batteries have limited sauce
+static int soundThreshold = 50; // To adjust the sensitivity of the sound sensor
 
 // Getter for top button pressed
 bool topButtonDown()
 {
 	topButtonState = digitalRead(TOP_BUTTON_PIN);
-	return topButtonState == HIGH;
+	return topButtonState == LOW;
 }
 
 bool botButtonDown()
@@ -97,7 +99,7 @@ void setup() {
   randomSeed(1337); // because fuck you that's why
   Serial.begin(9600);
   matrix.begin();
-  matrix.setBrightness(31);    // Batteries have limited sauce
+  matrix.setBrightness(brightness);    // Batteries have limited sauce
 
   // Gettin' pinny with it
   pinMode(TOP_BUTTON_PIN, INPUT);
@@ -110,9 +112,11 @@ void setup() {
 
 // effects is an array of run functions, each can be stateful
 // the & is a reference to the function -- remember, runFn is a function pointer
-runFn effects[12] = {
+runFn effects[14] = {
   	&clear,
-  	&fill,
+        &fill,
+        &music,
+        &music2,
         &pulse,
         &party,
         &partySolids,
@@ -121,7 +125,7 @@ runFn effects[12] = {
 	&theaterChase,
 	&theaterChaseRainbow,
 	&rainbow,
-        &music,
+        &spiral,
 	&chase
 };
 
@@ -149,10 +153,8 @@ void loop()
   static int nextEffectTick = 0;
   unsigned long t = millis(); // Current elapsed time, milliseconds.
   int tickDelta = (int) (t - prevFrameTime);
-//  updateInputDeltas();
-  //color = int(getTopKnob()/4);
-  Serial.println("TOP: "+analogRead(TOP_KNOB_PIN));
-  Serial.println("BOT: "+getBotKnob());
+  updateInputDeltas();
+  color = Wheel(int(getTopKnob()/4));
   // Check if the button is pressed, if so advance current effect with loop
   if (botButtonDown())
   {
@@ -161,6 +163,13 @@ void loop()
     clear(10);
     delay(300);
   }
+  int b = checkTopButton();
+
+  // Get button event and act accordingly
+   if (b == 1) clickEvent();
+   if (b == 2) doubleClickEvent();
+   if (b == 3) holdEvent();
+
   
   // Dereference + grab current run function and tick it
   runFn current = *effects[currentEffect];
@@ -178,7 +187,101 @@ void loop()
   prevFrameTime = t;
 }
 
-// http://codebunk.com/b/77748565/
+//=================================================
+// Top Button Events to trigger
+
+// single click adjusts the brightness
+void clickEvent() {
+   brightness = int(getBotKnob()/4);
+   matrix.setBrightness(brightness);
+}
+// double click sets a new sound threshold
+void doubleClickEvent() {
+   soundThreshold = int(getBotKnob()/4);
+}
+//@TO-DO press and hold adjusts the speed of the effects
+void holdEvent() {
+
+}
+
+//=================================================
+//  MULTI-CLICK:  One Button, Multiple Events
+
+// Button timing variables
+int debounce = 20;          // ms debounce period to prevent flickering when pressing or releasing the button
+int DCgap = 250;            // max ms between clicks for a double click event
+int holdTime = 1000;        // ms hold period: how long to wait for press+hold event
+
+// Button variables
+boolean buttonVal = HIGH;   // value read from button
+boolean buttonLast = HIGH;  // buffered value of the button's previous state
+boolean DCwaiting = false;  // whether we're waiting for a double click (down)
+boolean DConUp = false;     // whether to register a double click on next release, or whether to wait and click
+boolean singleOK = true;    // whether it's OK to do a single click
+long downTime = -1;         // time the button was pressed down
+long upTime = -1;           // time the button was released
+boolean ignoreUp = false;   // whether to ignore the button release because the click+hold was triggered
+boolean waitForUp = false;        // when held, whether to wait for the up event
+boolean holdEventPast = false;    // whether or not the hold event happened already
+
+int checkTopButton() {    
+   int event = 0;
+   buttonVal = topButtonDown();
+   // Button pressed down
+   if (buttonVal == LOW && buttonLast == HIGH && (millis() - upTime) > debounce)
+   {
+       downTime = millis();
+       ignoreUp = false;
+       waitForUp = false;
+       singleOK = true;
+       holdEventPast = false;
+       if ((millis()-upTime) < DCgap && DConUp == false && DCwaiting == true)  DConUp = true;
+       else  DConUp = false;
+       DCwaiting = false;
+   }
+   // Button released
+   else if (buttonVal == HIGH && buttonLast == LOW && (millis() - downTime) > debounce)
+   {        
+       if (not ignoreUp)
+       {
+           upTime = millis();
+           if (DConUp == false) DCwaiting = true;
+           else
+           {
+               event = 2;
+               DConUp = false;
+               DCwaiting = false;
+               singleOK = false;
+           }
+       }
+   }
+   // Test for normal click event: DCgap expired
+   if ( buttonVal == HIGH && (millis()-upTime) >= DCgap && DCwaiting == true && DConUp == false && singleOK == true && event != 2)
+   {
+       event = 1;
+       DCwaiting = false;
+   }
+   // Test for hold
+   if (buttonVal == LOW && (millis() - downTime) >= holdTime) {
+       // Trigger "normal" hold
+       if (not holdEventPast)
+       {
+           event = 3;
+           waitForUp = true;
+           ignoreUp = true;
+           DConUp = false;
+           DCwaiting = false;
+           //downTime = millis();
+           holdEventPast = true;
+       }
+   }
+   buttonLast = buttonVal;
+   return event;
+}
+
+//=====================================================
+// Effects to cycle through
+
 //Theatre-style crawling lights with rainbow effect
 int theaterChaseRainbow(int delta)
 {
@@ -190,7 +293,7 @@ int theaterChaseRainbow(int delta)
 	for (int i = 0; i < matrix.numPixels(); i += 3)
 	{
 		// Toggle every third pixel
-		matrix.setPixelColor(i + q, Wheel((i + j) % 255));
+		matrix.setPixelColor(i + q, Wheel(j));
 	}
 
 	matrix.show(); 
@@ -249,7 +352,7 @@ int theaterChase(int delta)
   return wait;
 }
 
-int x[4] = {1, 5, 3, 2};
+//int x[4] = {1, 5, 3, 2};
 
 /**
 * Let's make some rainbows, h-rat
@@ -271,7 +374,7 @@ int hart(int delta)
   
   // Trigger on sound
   int sound = getSoundSensor();
-  if (sound > 100)
+  if (sound > soundThreshold)
   {
     // Event captured, add the drop!!
     // @todo: if any of those are NOT -1, then I should clear their state, because I just stole their index!!!
@@ -331,7 +434,7 @@ int dante(int delta)
   static int head = 0;
   
   int sound = getSoundSensor();
-  bool triggered = sound > 100;
+  bool triggered = sound > soundThreshold;
   
   if (triggered)
   {
@@ -483,12 +586,13 @@ int chase(int delta)
 
 	return 25;
 }
+
 int pulse(int delta)
 {
   static int brightnessMod = 0;
   static boolean brighter = true;
   if(brighter){ 
-  if (brightnessMod <=150){
+  if (brightnessMod <=100){
     brightnessMod +=1;
     matrix.setBrightness(brightnessMod);
   } else {
@@ -511,27 +615,70 @@ int pulse(int delta)
 // Respond to some music my nigga'
 int music(int delta)
 {
-  static int brightnessMod = 100;
+  static int brightnessMod = 0;
 
   int sound = getSoundSensor();
- // Serial.println("MUSIC SENSOR:"+sound);  
-  if (sound > 100)
+
+  if (sound > soundThreshold)
   {
-    brightnessMod = 150;
+    brightnessMod = 100;
   }
   
   if (brightnessMod > 0)
   {
+    matrix.fillScreen(color);
     matrix.setBrightness(brightnessMod);
     matrix.show();
-    brightnessMod--;
+    brightnessMod-=3;
+    
     if (brightnessMod <=0)
     {
       brightnessMod = 0;
+      clear(10);
     }
   }
+  return 0;
+}
+
+int music2(int delta)
+{
+  int sound = getSoundSensor();
+  static int i = matrix.width();
+  if (sound > soundThreshold)
+  {
+    i = 0;
+  }
+  if(i < matrix.width())
+  {
+    matrix.drawFastVLine(i, 0, matrix.height(), color);
+    matrix.drawFastVLine(i-1, 0, matrix.height(), 0);
+    matrix.show();
+    i++;
+  }
   
-  return 5;
+  return 25;
+}
+
+int spiral(int delta)
+{
+  static int offset = 0;
+  
+//  NEO_HEIGHT // rotation
+//  NEO_WIDTH // distance from center
+
+  int i = 0;
+  int r = 0;
+  int c = offset;
+  while (true)
+  {
+    matrix.drawPixel(r, c, Wheel(random(255)));
+    c = (c + 1) % NEO_HEIGHT; 
+    r++;
+    if (r > NEO_WIDTH) break;
+  }
+  
+  offset %= NEO_HEIGHT;
+  return 0;
 }
 
 // Input a value 0 to 255 to get a color value.
